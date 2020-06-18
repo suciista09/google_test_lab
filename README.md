@@ -1,4 +1,4 @@
-# bukalapak_test_lab
+# google_test_lab
 
 to change device matrix, simply modify android-matrix.yaml
 
