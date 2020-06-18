@@ -1,7 +1,7 @@
 def devices_matrix=[:]
 def matrix_name=[:]
-def channel_id='368241944'
-def token = '797238665:AAFh9QeFdF7kY-eGNWnv-2zNZ5UNEgsnZMo'
+def channel_id=''
+def token = ''
 def status_devices=[:]
 def status_test='SUCCESS'
 pipeline{
@@ -92,8 +92,8 @@ pipeline{
                     println "matrix to run : " + matrix_name
 
                     if(params.IS_ON_REGRESSION){
-                        channel_id='1001239740344'
-                        token='463597103:AAHGgAiYZ9wJXWBEFnVZD38vqAfZtGAsPMU'
+                        channel_id=''
+                        token=''
                     }
 
 
