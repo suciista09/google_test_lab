@@ -1,0 +1,229 @@
+def lastCommitId
+def market_version = params.MARKETING_VERSION
+def app_build_number = params.APP_BUILD_NUMBER
+def export_profile = params.EXPORT_PROFILE
+def BUILD_NUMBER = env.BUILD_NUMBER
+def JOB_NAME = env.JOB_NAME
+def checkout_dir = '/Users/bukalapak/'+ JOB_NAME
+def build_dir = checkout_dir + '/bl_ios'
+
+def unlockKeychain(){
+    sh '''
+        security unlock-keychain -p bukalapak \
+        ${HOME}/.jenkins/ios-cert/login.keychain-db;
+        security set-keychain-settings \
+        -t 3600 \
+        -l ${HOME}/.jenkins/ios-cert/login.keychain-db;
+        security list-keychains \
+        -s ${HOME}/.jenkins/ios-cert/login.keychain-db;
+        security import ${HOME}/.jenkins/ios-cert/Certificates_dist.p12 \
+        -k ${HOME}/.jenkins/ios-cert/login.keychain-db \
+        -P bukalapak –A
+    '''
+}
+
+def unlockKeychainApp(){
+    sh '''
+        security unlock-keychain -p bukalapak \
+        ${HOME}/.jenkins/ios-cert/login.keychain-db;
+        security set-keychain-settings \
+        -t 3600 \
+        -l ${HOME}/.jenkins/ios-cert/login.keychain-db;
+        security list-keychains \
+        -s ${HOME}/.jenkins/ios-cert/login.keychain-db;
+        security import ${HOME}/jenkins/exp_ipa/appstore/Certificates.p12 \
+        -k ${HOME}/.jenkins/ios-cert/login.keychain-db \
+        -P !3uk414p4k –A
+    '''
+}
+
+pipeline {
+
+    agent {
+        node { label 'ios-builder-3'}
+    }
+
+    parameters {
+        string defaultValue: '', description: '', name: 'BRANCH', trim: false
+        string defaultValue: '', description: '', name: 'MARKETING_VERSION', trim: false
+        string defaultValue: '', description: '', name: 'APP_BUILD_NUMBER', trim: false
+        choice choices: ['AD-HOC','IOS-APP-STORE'], description: '', name: 'EXPORT_PROFILE'
+    }
+
+    stages {
+        stage('Check build'){
+            steps{
+                script{
+                    def jobName = env.JOB_NAME
+                    def buildNumber = env.BUILD_NUMBER.toInteger()
+                    def currentJob = Jenkins.instance.getItemByFullName(jobName)
+
+                    for (def build : currentJob.builds) {
+                        if (build.isBuilding() && build.number.toInteger() != buildNumber) {
+                            build.doStop()
+                            echo 'Aborted by next build!'
+                        }
+                    }
+                }
+            }
+        }
+        stage('Pull latest code'){
+            steps{
+                echo 'Pull latest code ...'
+                dir(checkout_dir){
+                    checkout(
+                        [
+                            $class: 'GitSCM',
+                            branches: [
+                                [
+                                    name: '*/${BRANCH}'
+                                ]
+                            ],
+                            doGenerateSubmoduleConfigurations: false,
+                            extensions: [],
+                            submoduleCfg: [],
+                            userRemoteConfigs: [
+                                [
+                                    credentialsId: '04e82665-d6c5-45d0-9e52-1329aa26c071',
+                                    url: 'https://github.com/bukalapak/bukalapak_ios'
+                                ]
+                            ]
+                        ]
+                    )
+                    script{
+                        lastCommitId = sh returnStdout: true, script: 'git rev-parse HEAD'
+                        lastCommitId = lastCommitId.replaceAll("\n","")
+                    }
+                }
+            }
+        }
+
+        stage('Install dependencies'){
+            steps{
+                echo 'Install dependencies...'
+                dir(build_dir){
+                    script{
+                        if( export_profile == 'AD-HOC' ){
+                            echo 'Unlock keychain for ad-hoc ...'
+                            unlockKeychain()
+                        }else{
+                            echo 'Unlock keychain for app-store ...'
+                            unlockKeychainApp()
+                        }
+                    }
+                    sh '''
+                        #:<<'COMMENT'
+                        rm -rf /Users/bukalapak/.cocoapods/repos/master/.git/index.lock
+                        export LANG=en_US.UTF-8
+                        pod repo update
+                        pod install
+                        #COMMENT
+                    '''
+                }
+            }
+        }
+
+        stage('Check market version'){
+            steps{
+                echo 'Checking marketing version ...'
+                dir(build_dir){
+                    script{
+                        if( market_version == '' ){
+                            market_version = sh returnStdout: true, script: 'agvtool mvers -terse1'
+                            market_version = market_version.trim()
+                        }else{
+                            sh 'agvtool new-marketing-version '+market_version
+                        }
+                        echo 'Marketing Version : '+market_version
+                    }
+                }
+            }
+        }
+
+        stage('Set build number'){
+            steps{
+                echo 'Setting build number ...'
+                dir(build_dir){
+                    script{
+                        if( app_build_number == '' ){
+                            app_build_number = '1.0'
+                        }else{
+                            sh 'agvtool new-version -all '+app_build_number
+                        }
+                        echo 'App Build Number : '+app_build_number
+                    }
+                }
+            }
+        }
+
+        stage ('Create archive'){
+            steps{
+                echo 'Creating the archive ...'
+                dir(build_dir){
+                    sh 'rm -rf build'
+                    sh 'xcodebuild clean -UseNewBuildSystem=NO'
+                    sh 'xcodebuild -workspace bl_ios.xcworkspace -scheme bl_ios -sdk iphoneos -configuration AppStoreDistribution archive -archivePath '+build_dir+'/build/bl_ios.xcarchive -UseNewBuildSystem=NO'
+                }
+            }
+        }
+
+        stage ('Export IPA Ad-Hoc'){
+            steps{
+                echo 'Exporting IPA file ...'
+                echo 'Export Profile : '+export_profile
+                dir(build_dir){
+                    script{
+                        if( export_profile == 'AD-HOC' ){
+                            echo 'Exporting Ad Hoc IPA file ...'
+                            sh 'xcodebuild -exportArchive -archivePath '+build_dir+'/build/bl_ios.xcarchive -exportOptionsPlist /Users/bukalapak/jenkins/exp_ipa/adhoc/exportOption.plist -exportPath '+build_dir+'/build'
+                        }else{
+                            echo 'Exporting App Store IPA file ...'
+                            sh 'xcodebuild -exportArchive -archivePath '+build_dir+'/build/bl_ios.xcarchive -exportOptionsPlist /Users/bukalapak/jenkins/exp_ipa/appstore/exportOption.plist -exportPath '+build_dir+'/build'
+                        }
+                    }
+                }
+            }
+        }
+
+        stage ('Create zip file'){
+            steps{
+                dir(build_dir+'/build/'){
+                    echo 'Create zip file ...'
+                    script{
+                        if( export_profile == 'AD-HOC' ){
+                            sh 'zip -r IPA-AdHoc-'+BUILD_NUMBER+'.zip bl_ios.ipa'
+                        }else{
+                            sh 'zip -r IPA-Appstore-'+BUILD_NUMBER+'.zip bl_ios.ipa'
+                        }
+                    }
+                }
+            }
+        }
+
+        stage ('Publish artifact'){
+            steps{
+                dir(build_dir){
+                    script{
+                        if( export_profile == 'AD-HOC' ){
+                            archiveArtifacts 'build/IPA-AdHoc-'+ BUILD_NUMBER +'.zip'
+                        }else{
+                            archiveArtifacts 'build/IPA-Appstore-'+ BUILD_NUMBER +'.zip'
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    post{
+        success{
+            echo "Build succeed"
+        }
+        failure{
+            echo "Build failure"
+        }
+        aborted{
+            echo "Build has been aborted."
+        }
+    }
+}

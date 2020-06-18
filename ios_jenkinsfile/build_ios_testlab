@@ -1,0 +1,172 @@
+def checkout_dir = '/Users/bukalapak/ioslab'
+def build_dir = checkout_dir + '/bl_ios'
+def derived_data_dir = '/Users/bukalapak/ioslabDerData'
+def build_config = 'Debug'
+def sdk = 'iphoneos'
+def app_branch = params.BRANCH
+def default_app_dir = '/Users/bukalapak/ioslab'
+def matrix = params.MATRIX
+def isreg = params.isRegression
+def output_ver
+def test_channel_id='368241944'
+def test_token = '797238665:AAFh9QeFdF7kY-eGNWnv-2zNZ5UNEgsnZMo'
+
+def unlockKeychain(){
+    sh '''
+        security unlock-keychain -p bukalapak \
+        ${HOME}/.jenkins/ios-cert/login.keychain-db;
+        security set-keychain-settings \
+        -t 3600 \
+        -l ${HOME}/.jenkins/ios-cert/login.keychain-db;
+        security list-keychains \
+        -s ${HOME}/.jenkins/ios-cert/login.keychain-db;
+        security import ${HOME}/.jenkins/ios-cert/Certificates.p12 \
+        -k ${HOME}/.jenkins/ios-cert/login.keychain-db \
+        -P bukalapak –A
+    '''
+}
+
+pipeline {
+
+	agent {
+        node { label 'ios-builder-3'}
+    }
+
+    parameters {
+        string(defaultValue: 'all', description: 'device matrix to run (please refer to ios-matrix.yml)', name: 'MATRIX')
+        string(defaultValue: '', description: 'branch from bukalapak_ios repo', name: 'BRANCH')
+        booleanParam(defaultValue: false, description: 'check if you want to send notification to regression channel', name: 'isRegression')
+    }
+
+	stages {
+	    stage('Checkout'){
+	    	steps {
+	    		echo 'Checkout ...'
+	    		dir(checkout_dir){
+                    checkout(
+                        [
+                            $class: 'GitSCM',
+                            branches: [
+                                [
+                                    name: app_branch
+                                ]
+                            ],
+                            doGenerateSubmoduleConfigurations: false,
+                            extensions: [],
+                            submoduleCfg: [],
+                            userRemoteConfigs: [
+                                [
+                                    credentialsId: '04e82665-d6c5-45d0-9e52-1329aa26c071',
+                                    url: 'https://github.com/bukalapak/bukalapak_ios'
+                                ]
+                            ]
+                        ]
+                    )
+                }
+	    	}
+	    }
+
+	    stage('Install dependencies'){
+            steps{
+                echo 'Install dependencies...'
+                dir(build_dir){
+                    script{
+                        if( sdk == 'iphoneos' ){
+                            unlockKeychain()
+                        }
+                    }
+                    //sh 'echo bukalapak | sudo -S gem install -n /usr/local/bin cocoapods --verbose'
+                    sh 'export LANG=en_US.UTF-8'
+                    sh 'pod repo update'
+                    sh 'pod install'
+                    sh 'rm -rf '+derived_data_dir+'/*'
+                }
+            }
+        }
+
+	    stage('Clean and Build Test App'){
+            steps{
+            	echo 'Building Debug App ...'
+                dir(build_dir){
+                   script{
+                         output_ver = sh returnStdout: true, script: 'agvtool mvers -terse1'
+                    }
+                	sh 'rm -rf build'
+                	sh 'xcodebuild clean'
+                	//sh 'xcodebuild -workspace bl_ios.xcworkspace -list'
+                	sh 'xcodebuild build-for-testing -workspace bl_ios.xcworkspace -scheme BukalapakUITests -sdk '+sdk+' -configuration '+build_config+' -derivedDataPath '+derived_data_dir+' -destination generic/platform=iOS'
+                	sh '''
+                            if [ -d build ]; then
+                                rm -rf build/*
+                            else
+                                mkdir build
+                             fi
+                    '''
+                }
+            }
+        }
+
+        stage('Copy From Derived Data'){
+        	steps{
+        		echo 'Copy Test Build and XCTestrun ...'
+        		dir(derived_data_dir+'/Build/Products'){
+        			sh 'ls'
+        			sh 'zip -r testlab.zip Debug-iphoneos BukalapakUITests*.xctestrun'
+        			stash includes: 'testlab.zip', name: 'testlab'
+        		}
+        	}
+        }
+
+        stage('Move App to Default Directory'){
+            steps{
+                echo 'Unstash App ...'
+                dir(default_app_dir){
+                    sh 'pwd'
+                    unstash 'testlab'
+                    sh 'ls'
+                }
+            }
+        }
+    }
+
+    post{
+        success{
+            echo 'BRANCH : '+app_branch
+            echo 'MATRIX : '+matrix
+            echo 'VERSION : '+output_ver
+            echo 'isRegression : '+isreg
+            build(
+                job : 'core-qa/ios-testlab-matrix',
+                parameters: [
+                    [
+                    $class: 'StringParameterValue',
+                    name: 'MATRIX',
+                    value: matrix
+                    ],
+                    [
+                    $class: 'StringParameterValue',
+                    name: 'VERSION',
+                    value: output_ver
+                    ],
+                    [
+                    $class: 'StringParameterValue',
+                    name: 'BRANCH',
+                    value: app_branch
+                    ],
+                    [
+                    $class: 'BooleanParameterValue',
+                    name: 'isRegression',
+                    value: isreg
+                    ]
+                ]
+            )
+        }
+        failure{
+            echo 'BUILD IOS TEST FAILURE'
+            sh'''
+                curl -s -X POST "https://api.telegram.org/bot'''+test_token+'''/sendMessage" \
+                -d 'chat_id=-'''+test_channel_id+'''&parse_mode=html&text=Failure on build process for bl-ios-testlab! Please check.\nDetails : <a href=\"'''+ env.BUILD_URL +'''/console\" target=\"_blank\">here</a>'
+            '''
+        }
+    }
+}

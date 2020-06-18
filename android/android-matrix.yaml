@@ -1,0 +1,16 @@
+google-pixel:
+  type: robo
+  timeout: 2m
+  device-ids: sailfish
+  os-version-ids: [27, 28]
+  locales: en
+
+samsung-galaxy-s7:
+  type: robo
+  timeout: 2m
+  device-ids: herolte
+  os-version-ids: [23]
+  locales: en
+
+
+

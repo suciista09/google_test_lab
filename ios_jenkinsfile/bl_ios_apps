@@ -1,0 +1,202 @@
+def BUILD_CONFIG = params.BUILD_CONFIG
+def SDK = params.SDK
+def BUILD_NUMBER = env.BUILD_NUMBER
+def DERIVED_DATA_ID = 'dqzipeolmysslladaghumwtaanim'
+def DERIVED_DATA_DIR = '/Users/bukalapak/Library/Developer/Xcode/DerivedData'
+def BL_IOS_DIR = DERIVED_DATA_DIR + '/bl_ios-' + DERIVED_DATA_ID
+def PRODUCTS_DIR = BL_IOS_DIR + '/Build/Products'
+def SOURCE_BUILD_DIR = PRODUCTS_DIR + '/' + BUILD_CONFIG + '-' + SDK 
+def JOB_NAME = env.JOB_NAME
+def UPSTREAM_JOB_NAME = JOB_NAME.replaceAll("iOS_Build/","")
+def CHECKOUT_DIR = '/Users/bukalapak/'+ JOB_NAME
+def BUILD_DIR = CHECKOUT_DIR + '/bl_ios'
+def appVersion
+def lastCommitId
+boolean isReg = false
+def dropboxFolder = '/Users/bukalapak/Dropbox/IOSAPP/'
+
+def unlockKeychain(){
+    sh '''
+        security unlock-keychain -p bukalapak \
+        ${HOME}/.jenkins/ios-cert/login.keychain-db;
+        security set-keychain-settings \
+        -t 3600 \
+        -l ${HOME}/.jenkins/ios-cert/login.keychain-db;
+        security list-keychains \
+        -s ${HOME}/.jenkins/ios-cert/login.keychain-db;
+        security import ${HOME}/.jenkins/ios-cert/Certificates_dist.p12 \
+        -k ${HOME}/.jenkins/ios-cert/login.keychain-db \
+        -P bukalapak –A
+    '''
+}
+
+pipeline{
+    agent {
+        node { label 'ios-builder-3'}
+    }
+    
+    triggers{
+        pollSCM ('H/10 * * * 1-5')
+    }
+
+    parameters {
+        string defaultValue: 'v2.37', description: '', name: 'BRANCH', trim: false
+        choice choices: ['Release', 'Debug'], description: '', name: 'BUILD_CONFIG'
+        choice choices: ['iphoneos', 'iphonesimulator'], description: '', name: 'SDK'
+        booleanParam defaultValue: isReg, description: '', name: 'isRegression'
+    }
+    
+    stages{
+        stage('Check build'){
+            steps{
+                script{
+                    def jobName = env.JOB_NAME
+                    def buildNumber = env.BUILD_NUMBER.toInteger()
+                    def currentJob = Jenkins.instance.getItemByFullName(jobName)
+
+                    for (def build : currentJob.builds) {
+                        if (build.isBuilding() && build.number.toInteger() != buildNumber) {
+                            build.doStop()
+                            echo 'Aborted by next build!'
+                        }
+                    }
+                }
+            }
+        }
+        stage('Pull latest code'){
+            steps{
+                dir(CHECKOUT_DIR){
+                    checkout(
+                        [
+                            $class: 'GitSCM', 
+                            branches: [
+                                [
+                                    name: '*/${BRANCH}'
+                                ]
+                            ], 
+                            doGenerateSubmoduleConfigurations: false, 
+                            extensions: [], 
+                            submoduleCfg: [], 
+                            userRemoteConfigs: [
+                                [
+                                    credentialsId: '04e82665-d6c5-45d0-9e52-1329aa26c071', 
+                                    url: 'https://github.com/bukalapak/bukalapak_ios'
+                                ]
+                            ]
+                        ]
+                    )
+                    script{
+                        lastCommitId = sh returnStdout: true, script: 'git rev-parse HEAD'
+                        lastCommitId = lastCommitId.replaceAll("\n","")
+                    }
+                }
+            }
+        }
+        stage('Install dependencies'){
+            steps{
+                dir(BUILD_DIR){
+                    script{
+                        if( SDK == 'iphoneos' ){
+                            unlockKeychain()
+                        }
+                        
+                        appVersion = sh returnStdout: true, script: 'agvtool mvers -terse1'
+                        appVersion = appVersion.trim()
+                    }
+                    sh '''
+                        #:<<'COMMENT'
+                        rm -rf /Users/bukalapak/.cocoapods/repos/master/.git/index.lock
+                        export LANG=en_US.UTF-8
+                        pod repo update
+                        pod install
+                        rm -rf ''' + DERIVED_DATA_DIR + '''/
+                        #COMMENT
+                    '''
+                }
+            }  
+        }
+        stage('Clean and build iOS app'){
+            steps{
+                dir(BUILD_DIR){
+                    sh '''
+                        #:<<'COMMENT'
+                        rm -rf build
+                        xcodebuild clean -UseNewBuildSystem=NO
+                        xcodebuild -workspace bl_ios.xcworkspace \
+                        -scheme bl_ios \
+                        -sdk ${SDK} \
+                        -configuration ${BUILD_CONFIG} \
+                        #-UseNewBuildSystem=NO
+                        #COMMENT
+                    '''
+                }
+            }
+        }
+        stage ('copy and publish artifact'){
+            steps{
+                script{
+                    dir(BUILD_DIR){
+                        sh '''
+                        #:<<'COMMENT'
+                            if [ -d build ]; then
+                                rm -rf build/*
+                            else
+                                mkdir build
+                             fi
+                        
+                            cp -r ''' + SOURCE_BUILD_DIR + '''/bl_ios.app build/
+                            cd build/
+                            zip -r ''' + BUILD_CONFIG + '''-''' + SDK + '''-''' + BUILD_NUMBER + '''.zip bl_ios.app
+                            
+                        #COMMENT
+                        '''
+                        sh 'cp -p build/'+ BUILD_CONFIG + '-' + SDK + '-' + BUILD_NUMBER +'.zip '+dropboxFolder
+                        archiveArtifacts 'build/' + BUILD_CONFIG + '-' + SDK + '-' + BUILD_NUMBER +'.zip'
+                    }
+                    
+                }
+            }
+        }
+    }
+    
+    post{
+        success{
+            echo "Build succeed"
+            echo "isRegression : "+isRegression
+            build job: 'ios-build-result-notification', 
+            parameters: [
+                booleanParam(name: 'isRegression', value: params.isRegression), 
+                string(name: 'APP_BUILD_STATUS', value: currentBuild.currentResult), 
+                string(name: 'APP_BUILD_NUMBER', value: BUILD_NUMBER), 
+                string(name: 'CONFIG', value: BUILD_CONFIG), 
+                string(name: 'BRANCH', value: BRANCH), 
+                string(name: 'APP_VERSION', value: appVersion), 
+                string(name: 'SDK', value: SDK), 
+                string(name: 'UPSTREAM_JOB_NAME', value: UPSTREAM_JOB_NAME), 
+                string(name: 'LAST_COMMIT_ID', value: lastCommitId)
+                ], 
+            wait: false
+        }
+        failure{
+            echo "Build failure"
+            echo "isRegression : "+isRegression
+            build job: 'ios-build-result-notification', 
+            parameters: [
+                booleanParam(name: 'isRegression', value: params.isRegression), 
+                string(name: 'APP_BUILD_STATUS', value: currentBuild.currentResult), 
+                string(name: 'APP_BUILD_NUMBER', value: BUILD_NUMBER), 
+                string(name: 'CONFIG', value: BUILD_CONFIG), 
+                string(name: 'BRANCH', value: BRANCH), 
+                string(name: 'APP_VERSION', value: appVersion), 
+                string(name: 'SDK', value: SDK), 
+                string(name: 'UPSTREAM_JOB_NAME', value: UPSTREAM_JOB_NAME), 
+                string(name: 'LAST_COMMIT_ID', value: lastCommitId)
+                ], 
+            wait: false
+        }
+        aborted{
+            echo "Build has been aborted."
+        }
+    }
+    
+}

@@ -1,0 +1,127 @@
+def devices_matrix=[:]
+def matrix_name=[:]
+def channel_id='368241944'
+def token = '797238665:AAFh9QeFdF7kY-eGNWnv-2zNZ5UNEgsnZMo'
+def status_devices=[:]
+def status_test='SUCCESS'
+pipeline{
+    options {
+        buildDiscarder(logRotator(numToKeepStr: '5', artifactNumToKeepStr: '5'))
+    }
+
+    agent{
+        node{
+            label 'core'
+        }
+    }
+
+    parameters{
+        string(defaultValue: 'all', description: 'device matrix to run (please refer to android-matrix.yml', name: 'MATRIX')
+        string(defaultValue: '', description: '', name: 'BRANCH_VERSION_APK')
+        string(defaultValue: '', description: '', name: 'BUILD_ID_APK')
+        string(defaultValue: '', description: '', name: 'TYPE')
+        booleanParam(name: 'IS_ON_REGRESSION', defaultValue: true, description: '')
+    }
+
+    stages{
+        stage('Getting device matrix'){
+            steps{
+                checkout([$class: 'GitSCM', branches: [[name: '*/master']], doGenerateSubmoduleConfigurations: false, extensions: [], submoduleCfg: [], userRemoteConfigs: [[credentialsId: 'suciista09', url: 'https://github.com/bukalapak/bukalapak_test_lab.git']]])
+            }
+        }
+
+        stage('Preparation'){
+            steps{
+                sh'''
+                    cp /home/bukalapak/Dropbox/APK/v4.35-release.apk test.apk
+                    ls
+                    pwd
+                    gcloud auth activate-service-account --key-file="/home/bukalapak/Jenkins/gcp-credential/perfapp-poc-3237ec00147e.json"
+                    gcloud config set project bukalapak-android
+                '''
+            }
+        }
+
+        stage('Run Testing'){
+            steps{
+                script{
+
+                    devices_matrix = readYaml file: 'android/android-matrix.yaml'
+
+                    if(params.MATRIX.equals("all")){
+                        matrix_name = devices_matrix.keySet()
+                        def tests=[:]
+
+                        for(i=0;i<matrix_name.size();i++){
+                            def matrix=matrix_name[i]
+
+                            tests["device_${i}"] = {
+
+                                def command = 'gcloud firebase test android run android/android-matrix.yaml:'+matrix+'  --project bukalapak-android  --app test.apk'
+
+                                def exitCode = sh(
+                                    script: command,
+                                    returnStatus: true
+                                )
+
+                                if(exitCode==0){
+                                    status_devices.put(matrix,exitCode)
+                                }
+
+                            }
+                        }
+
+                        parallel tests
+
+                    }else{
+                        matrix_name = params.MATRIX
+
+                        def command = 'gcloud firebase test android run android/android-matrix.yaml:'+matrix+'  --project bukalapak-android  --app test.apk'
+
+                        def exitCode = sh(
+                            script: command,
+                            returnStatus: true
+                        )
+
+                        if(exitCode==0){
+                            status_devices.put(matrix,exitCode)
+                        }
+
+                    }
+
+                    println "matrix to run : " + matrix_name
+
+                    if(params.IS_ON_REGRESSION){
+                        channel_id='1001239740344'
+                        token='463597103:AAHGgAiYZ9wJXWBEFnVZD38vqAfZtGAsPMU'
+                    }
+
+
+                }
+
+            }
+        }
+    }
+
+    post{
+        always{
+
+            script{
+                def statuses = status_devices.values()
+                for(i=0;i<statuses.size();i++){
+                    def status = statuses[i]
+                    if(status!=0){
+                        status_test='FAILURE';
+                    }
+
+                }
+                currentBuild.result = status_test
+            }
+            println "Result : " + currentBuild.result
+            sh'''
+            curl -s -X POST "https://api.telegram.org/bot'''+token+'''/sendMessage" \
+            -d 'chat_id=-'''+channel_id+'''&parse_mode=html&text=Initial test for Android has been executed using Firebase Test Lab.\nResult : '''+ currentBuild.result+'''\nAPK Version : '''+params.BRANCH_VERSION_APK+'''_'''+params.TYPE+'''_'''+BUILD_ID_APK+'''\nDetails : <a href=\"'''+ env.BUILD_URL +'''/console\" target=\"_blank\">here</a>'
+            '''
+        }
+    }
+}
